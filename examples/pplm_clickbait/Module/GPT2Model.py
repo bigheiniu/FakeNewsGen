@@ -26,9 +26,9 @@ from torch.nn import CrossEntropyLoss
 
 from transformers.configuration_gpt2 import GPT2Config
 from transformers.file_utils import add_start_docstrings
-from transformers.modeling_utils import Conv1D, PreTrainedModel, SequenceSummary, prune_conv1d_layer
+from transformers.modeling_utils import Conv1D, SequenceSummary, prune_conv1d_layer
 from examples.pplm_clickbait.Module.Layers import LayerNorm
-
+from examples.pplm_clickbait.Module.modeling_utils import PreTrainedModel
 
 logger = logging.getLogger(__name__)
 
@@ -217,15 +217,16 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, n_ctx, config, scale=False, c_normal=False, c_hidden=-1):
+    def __init__(self, n_ctx, config, scale=False, c_normal=False, c_hidden_size=-1):
         super(Block, self).__init__()
         nx = config.n_embd
         self.c_normal=c_normal
         #ATTENTION: to test the conditional layer normalization
-        if c_normal and c_hidden != -1:
+        # if c_normal and c_hidden_size != -1:
+        if c_normal and c_hidden_size != -1:
             print("Using the Conditional Layer Normalization")
-            self.ln_1 = LayerNorm(nx, c_hidden, eps=config.layer_norm_epsilon)
-            self.ln_2 = LayerNorm(nx, c_hidden, eps=config.layer_norm_epsilon)
+            self.ln_1 = LayerNorm(nx, c_hidden_size, eps=config.layer_norm_epsilon)
+            self.ln_2 = LayerNorm(nx, c_hidden_size, eps=config.layer_norm_epsilon)
         else:
             print("Using the Normal Layer Normalization")
             self.ln_1 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
@@ -369,7 +370,7 @@ class GPT2Model(GPT2PreTrainedModel):
 
     """
 
-    def __init__(self, config, c_hidden=None):
+    def __init__(self, config):
         super(GPT2Model, self).__init__(config)
         self.output_hidden_states = config.output_hidden_states
         self.output_attentions = config.output_attentions
@@ -377,14 +378,14 @@ class GPT2Model(GPT2PreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
+        self.condition_embedding = nn.Embedding(2, config.c_hidden_size)
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
-        self.c_hidden = c_hidden
+        self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True, c_normal=config.c_normal,
+                                      c_hidden_size=config.c_hidden_size) for _ in range(config.n_layer)])
         self.c_normal = config.c_normal
-        if self.c_hidden is None and config.c_normal and config.layer_norm_cond_hidden_size:
-            self.c_hidden = nn.Parameter(torch.Tensor(*config.layer_norm_cond_hidden_size))
-        if config.c_normal and self.c_hidden:
-            self.ln_f = LayerNorm(config.n_embd, config.c_hidden, eps=config.layer_norm_epsilon)
+        self.c_hidden_size = config.c_hidden_size
+        if config.c_normal and self.c_hidden_size:
+            self.ln_f = LayerNorm(config.n_embd, config.c_hidden_size, eps=config.layer_norm_epsilon)
         else:
             self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
@@ -411,8 +412,11 @@ class GPT2Model(GPT2PreTrainedModel):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
-        inputs_embeds=None
+        inputs_embeds=None,
+        condition_label=None
     ):
+        if self.c_normal:
+            condition_emb = self.condition_embedding(condition_label)
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -492,6 +496,8 @@ class GPT2Model(GPT2PreTrainedModel):
         for i, (block, layer_past) in enumerate(zip(self.h, past)):
             if self.output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
+            if self.c_normal:
+                hidden_states = (hidden_states, condition_emb)
 
             outputs = block(
                 hidden_states, layer_past=layer_past, attention_mask=attention_mask, head_mask=head_mask[i]
@@ -504,8 +510,8 @@ class GPT2Model(GPT2PreTrainedModel):
             if self.output_attentions:
                 all_attentions.append(outputs[2])
 
-        if self.c_hidden and self.c_normal:
-            hidden_states = self.ln_f((hidden_states, self.c_hidden))
+        if self.c_normal:
+            hidden_states = self.ln_f((hidden_states, condition_emb))
         else:
             hidden_states = self.ln_f(hidden_states)
 
@@ -582,6 +588,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
 
         self.init_weights()
 
+    def set_pad_index(self, pad_index):
+        self.pad_index = pad_index
     def get_output_embeddings(self):
         return self.lm_head
 
@@ -604,6 +612,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         head_mask=None,
         inputs_embeds=None,
         labels=None,
+        condition_label=None,
     ):
         transformer_outputs = self.transformer(
             input_ids,
@@ -613,6 +622,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
+            condition_label=condition_label,
         )
         hidden_states = transformer_outputs[0]
 
@@ -625,7 +635,13 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
+            # mask ???
+            shift_labels = shift_labels.reshape(-1)
+            mask_index = torch.where(shift_labels == self.pad_index, torch.zeros_like(shift_labels),
+                                     torch.ones_like(shift_labels))
+            mask_index = mask_index.float()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = torch.sum(loss * mask_index) / torch.sum(mask_index)
             outputs = (loss,) + outputs
 
         return outputs  # (loss), lm_logits, presents, (all hidden_states), (attentions)
@@ -727,6 +743,7 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
         mc_token_ids=None,
         lm_labels=None,
         mc_labels=None,
+        pad_index=None,
     ):
         transformer_outputs = self.transformer(
             input_ids,
@@ -751,8 +768,12 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
         if lm_labels is not None:
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = lm_labels[..., 1:].contiguous()
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(reduction="none")
+            shift_labels = shift_labels.reshape(-1)
+            mask_index = torch.where(shift_labels == pad_index, torch.zeros_like(shift_labels), torch.ones_like(shift_labels))
+            mask_index = mask_index.float()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = torch.sum(loss * mask_index) / torch.sum(mask_index)
             outputs = (loss,) + outputs
 
         return outputs  # (lm loss), (mc loss), lm logits, mc logits, presents, (all hidden_states), (attentions)

@@ -566,7 +566,6 @@ class PreTrainedTokenizer(object):
 
         to_add_tokens = []
         for token in new_tokens:
-            assert isinstance(token, str)
             if self.init_kwargs.get("do_lower_case", False) and token not in self.all_special_tokens:
                 token = token.lower()
             if (
@@ -652,6 +651,7 @@ class PreTrainedTokenizer(object):
                 added_tokens += self.add_tokens(value)
             else:
                 assert isinstance(value, str)
+                print(value)
                 added_tokens += self.add_tokens([value])
             logger.info("Assigning %s to the %s key of the tokenizer", value, key)
             setattr(self, key, value)
@@ -1568,6 +1568,8 @@ class PreTrainedTokenizerFast(PreTrainedTokenizer):
         return self.decoder.decode(tokens)
 
     def add_tokens(self, new_tokens):
+        print("Fuck New {}".format(new_tokens))
+        print(self.tokenizer)
         self.tokenizer.add_tokens(new_tokens)
 
     def add_special_tokens(self, special_tokens_dict):

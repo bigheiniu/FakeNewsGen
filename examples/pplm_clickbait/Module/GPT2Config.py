@@ -73,6 +73,8 @@ class GPT2Config(PretrainedConfig):
         summary_activation=None,
         summary_proj_to_labels=True,
         summary_first_dropout=0.1,
+        c_normal=True,
+        c_hidden_size=128,
         **kwargs
     ):
         """Constructs GPT2Config.
@@ -111,6 +113,8 @@ class GPT2Config(PretrainedConfig):
         self.summary_activation = summary_activation
         self.summary_first_dropout = summary_first_dropout
         self.summary_proj_to_labels = summary_proj_to_labels
+        self.c_normal=c_normal
+        self.c_hidden_size=c_hidden_size
 
     @property
     def max_position_embeddings(self):

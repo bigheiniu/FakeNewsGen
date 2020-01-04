@@ -29,7 +29,7 @@ import random
 import re
 import shutil
 from typing import Tuple
-
+import pandas as pd
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_CLASSES = {
     "gpt2": (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
+    "distilgpt2": (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
     "openai-gpt": (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
     "bert": (BertConfig, BertForMaskedLM, BertTokenizer),
     "roberta": (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer),
@@ -84,8 +85,10 @@ MODEL_CLASSES = {
 
 
 class TextDataset(Dataset):
-    def __init__(self, tokenizer, args, file_path="train", block_size=512):
+    def __init__(self, tokenizer, args, file_path="train", block_size=60):
         assert os.path.isfile(file_path)
+        self.pad_token_id = tokenizer.pad_token_id
+        self.max_length = block_size
         directory, filename = os.path.split(file_path)
         cached_features_file = os.path.join(
             directory, args.model_name_or_path + "_cached_lm_" + str(block_size) + "_" + filename
@@ -100,19 +103,10 @@ class TextDataset(Dataset):
 
             self.examples = []
             #ATTENTION: read text line by line
-            # with open(file_path, encoding="utf-8") as f:
-            #     text = f.read()
-            with open(file_path, encoding="utf-8") as f:
-                text = f.readlines()
+            data = pd.read_csv(file_path, header=None).values.tolist()
 
-            tokenizer_text_list = [ tokenizer.convert_tokens_to_ids(tokenizer.tokenize(i)) for i in text]
-            tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
-
-            for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
-                self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size]))
-            # Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
-            # If your dataset is small, first you should loook for a bigger one :-) and second you
-            # can change this behavior by adding (model specific) padding.
+            # text and labels
+            self.examples = [(tokenizer.convert_tokens_to_ids(tokenizer.tokenize(i[0])), i[1]) for i in data]
 
             logger.info("Saving features into cached file %s", cached_features_file)
             with open(cached_features_file, "wb") as handle:
@@ -122,7 +116,15 @@ class TextDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, item):
-        return torch.tensor(self.examples[item])
+        # ATTENTION: return the label and the text
+        text = self.examples[item][0]
+        # pad to the max length
+        if len(text) < self.max_length:
+            text += [self.pad_token_id]*(self.max_length - len(text))
+        else:
+            text = [text[0]] + text[1:self.max_length - 2] + text[-1]
+        return torch.tensor(text), torch.tensor(self.examples[item][1])
+        # return torch.tensor(self.examples[item])
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False):
@@ -299,11 +301,13 @@ def train(args, train_dataset, model, tokenizer):
                 steps_trained_in_current_epoch -= 1
                 continue
 
+            batch, clickbait = batch
             inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
+            clickbait = clickbait.to(args.device)
             model.train()
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels, condition_label = clickbait)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
             if args.n_gpu > 1:
@@ -349,6 +353,15 @@ def train(args, train_dataset, model, tokenizer):
                     model_to_save = (
                         model.module if hasattr(model, "module") else model
                     )  # Take care of distributed/parallel training
+                    dirs = os.listdir(output_dir)
+                    dirs = ["{}/{}".format(output_dir, i) for i in dirs]
+                    dirs = [i for i in dirs if os.path.isdir(i)]
+                    if len(dirs) > 5:
+                        # remove the oldest
+                        oldest = min(dirs, key=os.path.getctime)
+                        shutil.rmtree(oldest)
+                        print("Remove {}".format(oldest))
+
                     model_to_save.save_pretrained(output_dir)
                     tokenizer.save_pretrained(output_dir)
 
@@ -401,12 +414,13 @@ def evaluate(args, model, tokenizer, prefix=""):
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        batch, c_labels = batch
         inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
-
+        c_labels = c_labels.to(args.device)
         with torch.no_grad():
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels, condition_label=c_labels)
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
         nb_eval_steps += 1
@@ -561,6 +575,7 @@ def main():
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
     parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
+    parser.add_argument("--max_length", type=int, default=100, help="Max length of the input sequence.")
     args = parser.parse_args()
 
     if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
@@ -637,7 +652,11 @@ def main():
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
         do_lower_case=args.do_lower_case,
         cache_dir=args.cache_dir if args.cache_dir else None,
+        add_prefix_space=True,
+        max_length=args.max_length,
     )
+    # add the pad tokens
+
     if args.block_size <= 0:
         args.block_size = (
             tokenizer.max_len_single_sentence
@@ -649,6 +668,9 @@ def main():
         config=config,
         cache_dir=args.cache_dir if args.cache_dir else None,
     )
+    tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    model.resize_token_embeddings(len(tokenizer))
+    model.set_pad_index(tokenizer.pad_token_id)
     model.to(args.device)
 
     if args.local_rank == 0:
@@ -690,6 +712,7 @@ def main():
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
         tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        model.set_pad_index(tokenizer.pad_token_id)
         model.to(args.device)
 
     # Evaluation
@@ -707,6 +730,7 @@ def main():
             prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
             model = model_class.from_pretrained(checkpoint)
+            model.set_pad_index(tokenizer.pad_token_id)
             model.to(args.device)
             result = evaluate(args, model, tokenizer, prefix=prefix)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
