@@ -90,6 +90,7 @@ class TextDataset(Dataset):
         self.pad_token_id = tokenizer.pad_token_id
         self.max_length = block_size
         directory, filename = os.path.split(file_path)
+
         cached_features_file = os.path.join(
             directory, args.model_name_or_path + "_cached_lm_" + str(block_size) + "_" + filename
         )
@@ -104,9 +105,8 @@ class TextDataset(Dataset):
             self.examples = []
             #ATTENTION: read text line by line
             data = pd.read_csv(file_path, header=None).values.tolist()
-
             # text and labels
-            self.examples = [(tokenizer.convert_tokens_to_ids(tokenizer.tokenize(i[0])), i[1]) for i in data]
+            self.examples = [(tokenizer.build_inputs_with_special_tokens(tokenizer.encode(i[0], max_length=self.max_length, pad_to_max_length=True)), i[1]) for i in data]
 
             logger.info("Saving features into cached file %s", cached_features_file)
             with open(cached_features_file, "wb") as handle:
@@ -119,10 +119,6 @@ class TextDataset(Dataset):
         # ATTENTION: return the label and the text
         text = self.examples[item][0]
         # pad to the max length
-        if len(text) < self.max_length:
-            text += [self.pad_token_id]*(self.max_length - len(text))
-        else:
-            text = [text[0]] + text[1:self.max_length - 2] + text[-1]
         return torch.tensor(text), torch.tensor(self.examples[item][1])
         # return torch.tensor(self.examples[item])
 
@@ -356,9 +352,11 @@ def train(args, train_dataset, model, tokenizer):
                     dirs = os.listdir(output_dir)
                     dirs = ["{}/{}".format(output_dir, i) for i in dirs]
                     dirs = [i for i in dirs if os.path.isdir(i)]
+                    print(dirs)
                     if len(dirs) > 5:
                         # remove the oldest
                         oldest = min(dirs, key=os.path.getctime)
+                        print(oldest)
                         shutil.rmtree(oldest)
                         print("Remove {}".format(oldest))
 

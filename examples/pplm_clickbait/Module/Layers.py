@@ -13,7 +13,7 @@ class LayerNorm(nn.Module):
         self.normalized_shape = tuple(normalized_shape)
         self.eps = eps
         self.elementwise_affine = elementwise_affine
-        self.conditional_units = conditional_shape
+        self.conditional_shape = conditional_shape
         if self.elementwise_affine:
             self.weight = nn.Parameter(torch.Tensor(*normalized_shape))
             self.bias = nn.Parameter(torch.Tensor(*normalized_shape))
@@ -35,8 +35,7 @@ class LayerNorm(nn.Module):
 
     def forward(self, inputs):
         x, cond = inputs
-        if self.conditional_units:
-            cond = self.hidden_dense(cond)
+        cond = self.hidden_dense(cond)
         for _ in range(len(x.shape) - len(cond.shape)):
             cond.unsqueeze_(1)
         weight = self.weight_layer(cond) + self.weight

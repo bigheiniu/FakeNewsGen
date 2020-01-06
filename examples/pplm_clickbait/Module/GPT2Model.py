@@ -19,6 +19,7 @@
 import logging
 import math
 import os
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -222,7 +223,6 @@ class Block(nn.Module):
         nx = config.n_embd
         self.c_normal=c_normal
         #ATTENTION: to test the conditional layer normalization
-        # if c_normal and c_hidden_size != -1:
         if c_normal and c_hidden_size != -1:
             print("Using the Conditional Layer Normalization")
             self.ln_1 = LayerNorm(nx, c_hidden_size, eps=config.layer_norm_epsilon)
@@ -496,6 +496,7 @@ class GPT2Model(GPT2PreTrainedModel):
         for i, (block, layer_past) in enumerate(zip(self.h, past)):
             if self.output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
+
             if self.c_normal:
                 hidden_states = (hidden_states, condition_emb)
 
@@ -635,7 +636,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            # mask ???
+            # ATTENTION: mask the pad tokens
             shift_labels = shift_labels.reshape(-1)
             mask_index = torch.where(shift_labels == self.pad_index, torch.zeros_like(shift_labels),
                                      torch.ones_like(shift_labels))
