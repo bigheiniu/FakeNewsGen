@@ -30,8 +30,10 @@ from nltk.tokenize.treebank import TreebankWordDetokenizer
 from torchtext import data as torchtext_data
 from torchtext import datasets
 from tqdm import tqdm, trange
+import pandas as pd
 
-from .pplm_classification_head import ClassificationHead
+
+from pplm_classification_head import ClassificationHead
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
@@ -280,32 +282,47 @@ def train_discriminator(
             class_size=len(idx2class), pretrained_model=pretrained_model, cached_mode=cached, device=device
         ).to(device)
 
-        with open("datasets/clickbait/clickbait_train_prefix.txt") as f:
-            data = []
-            for i, line in enumerate(f):
-                try:
-                    data.append(eval(line))
-                except Exception:
-                    print("Error evaluating line {}: {}".format(i, line))
-                    continue
+        # with open("datasets/clickbait/clickbait_train_prefix.txt") as f:
+        #     data = []
+        #     for i, line in enumerate(f):
+        #         try:
+        #             data.append(eval(line))
+        #         except Exception:
+        #             print("Error evaluating line {}: {}".format(i, line))
+        #             continue
         x = []
         y = []
-        with open("datasets/clickbait/clickbait_train_prefix.txt") as f:
-            for i, line in enumerate(tqdm(f, ascii=True)):
-                try:
-                    d = eval(line)
-                    seq = discriminator.tokenizer.encode(d["text"])
+        data = pd.read_csv("../pplm_clickbait/data/clickbait-detector/all.csv", header=None)
+        for i, line in enumerate(tqdm(data.values.tolist())):
+            try:
+                seq = discriminator.tokenizer.encode(line[0])
 
-                    if len(seq) < max_length_seq:
-                        seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
-                    else:
-                        print("Line {} is longer than maximum length {}".format(i, max_length_seq))
-                        continue
-                    x.append(seq)
-                    y.append(d["label"])
-                except Exception:
-                    print("Error evaluating / tokenizing" " line {}, skipping it".format(i))
-                    pass
+                if len(seq) < max_length_seq:
+                    seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
+                else:
+                    print("Line {} is longer than maximum length {}".format(i, max_length_seq))
+                    continue
+                x.append(seq)
+                y.append(line[1])
+            except Exception:
+                print("Error evaluating / tokenizing" " line {}, skipping it".format(i))
+                pass
+        # with open("../pplm_clickbait/data/clickbait-detector") as f:
+        #     for i, line in enumerate(tqdm(f, ascii=True)):
+        #         try:
+        #             d = eval(line)
+        #             seq = discriminator.tokenizer.encode(d["text"])
+        #
+        #             if len(seq) < max_length_seq:
+        #                 seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
+        #             else:
+        #                 print("Line {} is longer than maximum length {}".format(i, max_length_seq))
+        #                 continue
+        #             x.append(seq)
+        #             y.append(d["label"])
+        #         except Exception:
+        #             print("Error evaluating / tokenizing" " line {}, skipping it".format(i))
+        #             pass
 
         full_dataset = Dataset(x, y)
         train_size = int(0.9 * len(full_dataset))

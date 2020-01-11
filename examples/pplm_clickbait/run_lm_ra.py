@@ -36,7 +36,6 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampl
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-# TODO: Add Back Translation for the Style Transfer Model
 from transformers import (
     WEIGHTS_NAME,
     AdamW,
@@ -105,10 +104,17 @@ class TextDataset(Dataset):
 
             self.examples = []
             #ATTENTION: read text line by line
-            data = pd.read_csv(file_path, header=None).values.tolist()
-            # text and labels
-            self.examples = [(tokenizer.build_inputs_with_special_tokens(tokenizer.encode(i[0], max_length=self.max_length, pad_to_max_length=True)), i[1]) for i in data]
+            data = pd.read_csv(file_path, header=None)
 
+            clickbait = " ".join(data[data[1] == 1][0].values.tolist())
+            non_clickbait = " ".join(data[data[1] == 0][0].values.tolist())
+            tokenized_text_click = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(clickbait))
+            tokenized_text_nonclick = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(non_clickbait))
+
+            for i in range(0, len(tokenized_text_click) - block_size + 1, block_size):
+                self.examples.append((tokenizer.build_inputs_with_special_tokens(tokenized_text_click[i: i + block_size]), 1))
+            for i in range(0, len(tokenized_text_nonclick) - block_size + 1, block_size):
+                self.examples.append((tokenizer.build_inputs_with_special_tokens(tokenized_text_nonclick[i: i + block_size]), 0))
             logger.info("Saving features into cached file %s", cached_features_file)
             with open(cached_features_file, "wb") as handle:
                 pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -194,27 +200,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels
-#
-# def collate_fn(data):
-#     def pad_sequences(sequences):
-#         lengths = [len(seq) for seq in sequences]
-#
-#         padded_sequences = torch.zeros(len(sequences), max(lengths)).long() # padding value = pad_id
-#
-#         for i, seq in enumerate(sequences):
-#             end = lengths[i]
-#             padded_sequences[i, :end] = seq[:end]
-#
-#         return padded_sequences, lengths
-#
-#     item_info = {}
-#     for key in data[0].keys():
-#         item_info[key] = [d[key] for d in data]
-#
-#     x_batch, _ = pad_sequences(item_info["X"])
-#     y_batch = torch.tensor(item_info["y"], dtype=torch.long)
-#
-#     return x_batch, y_batch
+
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
@@ -223,7 +209,7 @@ def train(args, train_dataset, model, tokenizer):
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -665,7 +651,7 @@ def main():
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(
         args.config_name if args.config_name else args.model_name_or_path,
-        cache_dir=args.cache_dir if args.cache_dir else None,
+        cache_dir=args.cache_dir if args.cache_dir else None
     )
     tokenizer = tokenizer_class.from_pretrained(
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
@@ -681,7 +667,7 @@ def main():
             tokenizer.max_len_single_sentence
         )  # Our input block size will be the max possible for the model
     args.block_size = min(args.block_size, tokenizer.max_len_single_sentence)
-    model, load_info = model_class.from_pretrained(
+    model, loading_info = model_class.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
@@ -691,13 +677,13 @@ def main():
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
     model.resize_token_embeddings(len(tokenizer))
     model.set_pad_index(tokenizer.pad_token_id)
+    # freeze the weight of language model
     for n, p in model.named_parameters():
-        if n in load_info['missing_keys']:
+        if n in loading_info['missing_keys']:
             p.requires_grad = True
         else:
             p.requires_grad = False
     model.to(args.device)
-
     if args.local_rank == 0:
         torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
 

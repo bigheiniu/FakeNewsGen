@@ -65,6 +65,7 @@ DISCRIMINATOR_MODELS_PARAMS = {
         "class_vocab": {"non_clickbait": 0, "clickbait": 1},
         "default_class": 1,
         "pretrained_model": "gpt2-medium",
+        "path": "../pplm/clickbait_classifier_head_epoch_7.pt",
     },
     "sentiment": {
         "url": "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/discriminators/SST_classifier_head.pt",

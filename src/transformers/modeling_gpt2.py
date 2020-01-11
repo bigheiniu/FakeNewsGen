@@ -567,6 +567,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         inputs = {"input_ids": input_ids}
         inputs.update(kwargs)
         return inputs
+    def set_pad_index(self, id):
+        self.pad_index = id
 
     def forward(
         self,
@@ -591,15 +593,19 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         hidden_states = transformer_outputs[0]
 
         lm_logits = self.lm_head(hidden_states)
-
         outputs = (lm_logits,) + transformer_outputs[1:]
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(reduction="none")
+            # loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            shift_labels = shift_labels.view(-1)
+            mask_index = torch.where(shift_labels == self.pad_index, torch.zeros_like(shift_labels), torch.ones_like(shift_labels))
+            mask_index = mask_index.float()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = torch.sum(loss * mask_index) / torch.sum(mask_index)
             outputs = (loss,) + outputs
 
         return outputs  # (loss), lm_logits, presents, (all hidden_states), (attentions)

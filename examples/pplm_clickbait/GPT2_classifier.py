@@ -20,7 +20,7 @@ import csv
 import json
 import math
 import time
-
+import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -30,27 +30,31 @@ from nltk.tokenize.treebank import TreebankWordDetokenizer
 from torchtext import data as torchtext_data
 from torchtext import datasets
 from tqdm import tqdm, trange
+from transformers.file_utils import cached_path
 
-from .pplm_classification_head import ClassificationHead
+
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-
-
+from sklearn.metrics import confusion_matrix
+from examples.pplm_clickbait.run_pplm import ClassificationHead, DISCRIMINATOR_MODELS_PARAMS
 torch.manual_seed(0)
 np.random.seed(0)
 EPSILON = 1e-10
 example_sentence = "This is incredible! I love it, this is the best chicken I have ever had."
-max_length_seq = 100
+max_length_seq = 150
 
 
 class Discriminator(torch.nn.Module):
     """Transformer encoder followed by a Classification Head"""
 
-    def __init__(self, class_size, pretrained_model="gpt2-medium", cached_mode=False, device="cpu"):
+    def __init__(self, class_size, pretrained_model="gpt2-medium", cached_mode=False, device="cpu", classifier_head=None):
         super(Discriminator, self).__init__()
         self.tokenizer = GPT2Tokenizer.from_pretrained(pretrained_model)
         self.encoder = GPT2LMHeadModel.from_pretrained(pretrained_model)
         self.embed_size = self.encoder.transformer.config.hidden_size
-        self.classifier_head = ClassificationHead(class_size=class_size, embed_size=self.embed_size)
+        if classifier_head:
+            self.classifier_head = classifier_head
+        else:
+            self.classifier_head = ClassificationHead(class_size=class_size, embed_size=self.embed_size)
         self.cached_mode = cached_mode
         self.device = device
 
@@ -83,7 +87,7 @@ class Discriminator(torch.nn.Module):
 
 class Dataset(data.Dataset):
     def __init__(self, X, y):
-        """Reads source and target sequences from txt files."""
+        """Reads source target sequences from txt files."""
         self.X = X
         self.y = y
 
@@ -162,6 +166,8 @@ def evaluate_performance(data_loader, discriminator, device="cpu"):
     discriminator.eval()
     test_loss = 0
     correct = 0
+    pred = []
+    labels = []
     with torch.no_grad():
         for input_t, target_t in data_loader:
             input_t, target_t = input_t.to(device), target_t.to(device)
@@ -170,16 +176,19 @@ def evaluate_performance(data_loader, discriminator, device="cpu"):
             test_loss += F.nll_loss(output_t, target_t, reduction="sum").item()
             # get the index of the max log-probability
             pred_t = output_t.argmax(dim=1, keepdim=True)
+            pred.extend(pred_t.cpu().tolist())
+            labels.extend(target_t.view_as(pred_t).cpu().tolist())
             correct += pred_t.eq(target_t.view_as(pred_t)).sum().item()
 
     test_loss /= len(data_loader.dataset)
-
+    c_m = confusion_matrix(labels, pred)
     print(
         "Performance on test set: "
         "Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)".format(
             test_loss, correct, len(data_loader.dataset), 100.0 * correct / len(data_loader.dataset)
         )
     )
+    print("Confusion Matrix {}".format(c_m))
 
 
 def predict(input_sentence, model, classes, cached=False, device="cpu"):
@@ -239,7 +248,6 @@ def train_discriminator(
         discriminator = Discriminator(
             class_size=len(idx2class), pretrained_model=pretrained_model, cached_mode=cached, device=device
         ).to(device)
-
         text = torchtext_data.Field()
         label = torchtext_data.Field(sequential=False)
         train_data, val_data, test_data = datasets.SST.splits(text, label, fine_grained=True, train_subtrees=True,)
@@ -477,13 +485,94 @@ def train_discriminator(
                 "{}_classifier_head_epoch_{}.pt".format(dataset, epoch + 1),
             )
 
+def evaluate(dataset,
+             dataset_fp=None,
+             pretrained_model="gpt2-medium",
+             epochs=10,
+             batch_size=64,
+             log_interval=10,
+             save_model=False,
+             cached=False,
+             no_cuda=False,):
+
+    device = "cuda" if torch.cuda.is_available() and not no_cuda else "cpu"
+    idx2class = ["non_clickbait", "clickbait"]
+    class2idx = {c: i for i, c in enumerate(idx2class)}
+    params = DISCRIMINATOR_MODELS_PARAMS["clickbait"]
+    classifier = ClassificationHead(class_size=params["class_size"], embed_size=params["embed_size"]).to(device)
+    use_method = "url"
+    if "url" in use_method:
+        resolved_archive_file = cached_path(params["url"])
+    elif "path" in use_method:
+        # print("hje")
+        resolved_archive_file = params["path"]
+    else:
+        raise ValueError("Either url or path have to be specified " "in the discriminator model parameters")
+    print("[ATTENTION]Load File From {}".format(resolved_archive_file))
+    classifier.load_state_dict(torch.load(resolved_archive_file, map_location=device))
+    classifier.eval()
+    discriminator = Discriminator(
+        class_size=len(idx2class), pretrained_model=pretrained_model, cached_mode=cached, device=device, classifier_head=classifier
+    ).to(device)
+    x_gen = []
+    x = []
+    y = []
+    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_freeze/generate.tsv"
+    file_path = "/home/yichuan/style_transfer/examples/pplm/generate.tsv"
+    data = pd.read_csv(file_path, sep="\t" if "tsv" in file_path else ",").values.tolist()
+    # with open("/home/yichuan/style_transfer/examples/pplm_clickbait/output_freeze/generate.csv") as f:
+    for i, elements in enumerate(tqdm(data)):
+        try:
+            # elements = line.split(",")
+            d = {"text": elements[0], "gen": elements[1], "label": int(elements[-1])}
+            # d = {"text": elements[-1], "gen": elements[1], "label": int(elements[0])}
+            assert len(d['text'].split()) != len(d['gen'].split())
+            # d = eval(line)
+            seq = discriminator.tokenizer.encode(d["text"])
+            seq_gen = discriminator.tokenizer.encode(d["gen"])
+            length = len(seq)
+            if len(seq) < max_length_seq:
+                seq = torch.tensor([50256] + seq, device=device, dtype=torch.long)
+            else:
+                print("Line {} is longer than maximum length {}".format(i, max_length_seq))
+                continue
+            if len(seq_gen) < max_length_seq + length:
+                seq_gen = torch.tensor([50256] + seq_gen[length:], device=device, dtype=torch.long)
+            else:
+                print("Line {} is longer than maximum length {} in gen".format(i, max_length_seq))
+                continue
+            x.append(seq)
+            x_gen.append(seq_gen)
+            y.append(d["label"])
+        except Exception:
+            print("Error evaluating / tokenizing" " line {}, skipping it".format(i))
+            pass
+
+    test_dataset = Dataset(x, y)
+    test_dataset_gen = Dataset(x_gen, y)
+
+
+    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, collate_fn=collate_fn)
+    test_loader_gen = torch.utils.data.DataLoader(dataset=test_dataset_gen, batch_size=batch_size, collate_fn=collate_fn)
+    discriminator_meta = {
+        "class_size": len(idx2class),
+        "embed_size": discriminator.embed_size,
+        "pretrained_model": pretrained_model,
+        "class_vocab": class2idx,
+        "default_class": 1,
+    }
+
+    evaluate_performance(test_loader, discriminator, device)
+    print("The result for the generated samples are coming")
+    evaluate_performance(test_loader_gen, discriminator, device)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a discriminator on top of GPT-2 representations")
     parser.add_argument(
         "--dataset",
         type=str,
-        default="SST",
+        default="clickbait",
         choices=("SST", "clickbait", "toxic", "generic"),
         help="dataset to train the discriminator on."
         "In case of generic, the dataset is expected"
@@ -512,6 +601,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_model", action="store_true", help="whether to save the model")
     parser.add_argument("--cached", action="store_true", help="whether to cache the input representations")
     parser.add_argument("--no_cuda", action="store_true", help="use to turn off cuda")
+    # parser.add_argument("--file_path", required=True)
     args = parser.parse_args()
 
-    train_discriminator(**(vars(args)))
+    evaluate(**(vars(args)))

@@ -169,7 +169,7 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=1,
         help="temperature of 1.0 has no effect, lower tend toward greedy sampling",
     )
     parser.add_argument(
@@ -183,7 +183,8 @@ def main():
 
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
     parser.add_argument("--no_cuda", action="store_true", help="Avoid using CUDA when available")
-    parser.add_argument("--prompt_file",type=str, default="", help="Prompt Name and the conditional Label")
+    parser.add_argument("--no_file", action="store_true", help="Generate with file")
+    parser.add_argument("--prompt_file",type=str, default="", help="Prompt text and the conditional label")
     parser.add_argument("--output_file", type=str, default="", help="Output directory")
     args = parser.parse_args()
 
@@ -206,37 +207,77 @@ def main():
     args.length = adjust_length_to_model(args.length, max_sequence_length=model.config.max_position_embeddings)
     logger.info(args)
 
-    prompt_list = pd.read_csv(args.prompt_file, header=None).values.tolist()
-    prompt_text_list = [i[0] for i in prompt_list]
-    prompt_labels_list = [i[1] for i in prompt_list]
-    encoded_prompt = [tokenizer.encode(prompt_text, add_special_tokens=False, return_tensors="pt") for prompt_text in prompt_text_list]
-    fout = open(args.output_file, 'w+')
-    total = len(encoded_prompt)
-    iter = zip(encoded_prompt, prompt_labels_list)
-    with tqdm(total=total) as pbar:
-        for e_p, c_label in iter:
-            c_label = torch.tensor([c_label]).to(args.device)
-            e_p = e_p.to(args.device)
-            output_sequences = model.generate(
-                input_ids=e_p,
-                max_length=args.length,
-                temperature=args.temperature,
-                top_k=args.k,
-                top_p=args.p,
-                repetition_penalty=args.repetition_penalty,
-                condition_label=c_label,
-            )
-    
-        # Batch size == 1. to add more examples please use num_return_sequences > 1
-            generated_sequence = output_sequences[0].tolist()
-            text = tokenizer.decode(generated_sequence, clean_up_tokenization_spaces=True)
-            text = text[: text.find(args.stop_token) if args.stop_token else None]
-            text = text.replace("<pad>", "")
-            prompt_text = tokenizer.decode(e_p.cpu()[0].tolist(), clean_up_tokenization_spaces=True)
-            c_label = c_label.cpu()[0].tolist()
-            fout.write("{}\t{}\t{}\n".format(c_label, text, prompt_text))
-            pbar.update(1)
 
+    def file_gen():
+        prompt_list = pd.read_csv(args.prompt_file).values.tolist()
+        prompt_text_list = [i[0] for i in prompt_list]
+        # prompt_text_list = [i[0] for i in prompt_list]
+        prompt_labels_list = [i[-1] for i in prompt_list]
+        encoded_prompt = [tokenizer.encode(prompt_text, add_special_tokens=False, return_tensors="pt") for prompt_text in
+                          prompt_text_list]
+        fout = open(args.output_file, 'w+')
+        total = len(encoded_prompt)
+        iter = zip(encoded_prompt, prompt_labels_list)
+
+        with tqdm(total=total) as pbar:
+            for e_p, c_label in iter:
+                # while True:
+                #     c_label = int(input("condition Label>>"))
+                #     text = input("Prompt Text>>")
+                #     e_p = tokenizer.encode(text, add_special_tokens=False, return_tensors="pt")
+                c_label = torch.tensor([c_label]).to(args.device)
+                e_p = e_p.to(args.device)
+                output_sequences = model.generate(
+                    input_ids=e_p,
+                    max_length=args.length,
+                    temperature=args.temperature,
+                    top_k=args.k,
+                    top_p=args.p,
+                    repetition_penalty=args.repetition_penalty,
+                    condition_label=c_label,
+                    do_sample=True
+                )
+
+                # Batch size == 1. to add more examples please use num_return_sequences > 1
+                generated_sequence = output_sequences[0].tolist()
+                text = tokenizer.decode(generated_sequence, clean_up_tokenization_spaces=True)
+                text = text[: text.find(args.stop_token) if args.stop_token else None]
+                text = text.replace("<pad>", "")
+                text = text.replace("\n", " ")
+                prompt_text = tokenizer.decode(e_p.cpu()[0].tolist(), clean_up_tokenization_spaces=True)
+                c_label = c_label.cpu()[0].tolist()
+                fout.write("{}\t{}\t{}\n".format(c_label, text, prompt_text))
+                pbar.update(1)
+
+    def prompt_gen():
+        while True:
+                    c_label = int(input("condition Label>>"))
+                    text = input("Prompt Text>>")
+                    e_p = tokenizer.encode(text, add_special_tokens=False, return_tensors="pt")
+                    c_label = torch.tensor([c_label]).to(args.device)
+                    e_p = e_p.to(args.device)
+                    output_sequences = model.generate(
+                        input_ids=e_p,
+                        max_length=args.length,
+                        temperature=args.temperature,
+                        top_k=args.k,
+                        top_p=args.p,
+                        repetition_penalty=args.repetition_penalty,
+                        condition_label=c_label,
+                        do_sample=True
+                    )
+
+                    # Batch size == 1. to add more examples please use num_return_sequences > 1
+                    generated_sequence = output_sequences[0].tolist()
+                    text = tokenizer.decode(generated_sequence, clean_up_tokenization_spaces=True)
+                    text = text[: text.find(args.stop_token) if args.stop_token else None]
+                    text = text.replace("<pad>", "")
+                    text = text.replace("\n", " ")
+                    print(text)
+    if args.no_file:
+        prompt_gen()
+    else:
+        file_gen()
 
 if __name__ == "__main__":
     main()

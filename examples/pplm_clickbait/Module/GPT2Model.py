@@ -591,6 +591,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
 
     def set_pad_index(self, pad_index):
         self.pad_index = pad_index
+
     def get_output_embeddings(self):
         return self.lm_head
 
@@ -635,7 +636,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(reduction="none")
             # ATTENTION: mask the pad tokens
             shift_labels = shift_labels.reshape(-1)
             mask_index = torch.where(shift_labels == self.pad_index, torch.zeros_like(shift_labels),

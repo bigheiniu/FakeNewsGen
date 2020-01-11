@@ -29,14 +29,13 @@ import random
 import re
 import shutil
 from typing import Tuple
-import pandas as pd
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-# TODO: Add Back Translation for the Style Transfer Model
 from transformers import (
     WEIGHTS_NAME,
     AdamW,
@@ -49,7 +48,8 @@ from transformers import (
     DistilBertConfig,
     DistilBertForMaskedLM,
     DistilBertTokenizer,
-    # GPT2Config,
+    GPT2Config,
+    GPT2LMHeadModel,
     GPT2Tokenizer,
     OpenAIGPTConfig,
     OpenAIGPTLMHeadModel,
@@ -60,10 +60,7 @@ from transformers import (
     RobertaTokenizer,
     get_linear_schedule_with_warmup,
 )
-
-from examples.pplm_clickbait.Module.GPT2Model import GPT2LMHeadModel
-from examples.pplm_clickbait.Module.GPT2Config import GPT2Config
-
+import pandas as pd
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -76,7 +73,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_CLASSES = {
     "gpt2": (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
-    "distilgpt2": (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
     "openai-gpt": (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
     "bert": (BertConfig, BertForMaskedLM, BertTokenizer),
     "roberta": (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer),
@@ -86,12 +82,9 @@ MODEL_CLASSES = {
 
 
 class TextDataset(Dataset):
-    def __init__(self, tokenizer, args, file_path="train", block_size=60):
+    def __init__(self, tokenizer, args, file_path="train", block_size=512):
         assert os.path.isfile(file_path)
-        self.pad_token_id = tokenizer.pad_token_id
-        self.max_length = block_size
         directory, filename = os.path.split(file_path)
-
         cached_features_file = os.path.join(
             directory, args.model_name_or_path + "_cached_lm_" + str(block_size) + "_" + filename
         )
@@ -104,10 +97,19 @@ class TextDataset(Dataset):
             logger.info("Creating features from dataset file at %s", directory)
 
             self.examples = []
-            #ATTENTION: read text line by line
-            data = pd.read_csv(file_path, header=None).values.tolist()
-            # text and labels
-            self.examples = [(tokenizer.build_inputs_with_special_tokens(tokenizer.encode(i[0], max_length=self.max_length, pad_to_max_length=True)), i[1]) for i in data]
+            # with open(file_path, encoding="utf-8") as f:
+            #     text = f.read()
+            data = pd.read_csv(file_path, header=None)
+            th = data[data.iloc[:, 1] == 1]
+            text = " ".join(data[data.iloc[:, 1] == 1][0].values.tolist())
+
+            tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
+
+            for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
+                self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size]))
+            # Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
+            # If your dataset is small, first you should loook for a bigger one :-) and second you
+            # can change this behavior by adding (model specific) padding.
 
             logger.info("Saving features into cached file %s", cached_features_file)
             with open(cached_features_file, "wb") as handle:
@@ -117,12 +119,46 @@ class TextDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, item):
-        # ATTENTION: return the label and the text
-        text = self.examples[item][0]
-        # pad to the max length
-        return torch.tensor(text), torch.tensor(self.examples[item][1])
-        # return torch.tensor(self.examples[item])
+        return torch.tensor(self.examples[item])
 
+# class TextDataset(Dataset):
+#     def __init__(self, tokenizer, args, file_path="train", block_size=60):
+#         assert os.path.isfile(file_path)
+#         self.pad_token_id = tokenizer.pad_token_id
+#         self.max_length = block_size
+#         directory, filename = os.path.split(file_path)
+#
+#         cached_features_file = os.path.join(
+#             directory, args.model_name_or_path + "_cached_lm_" + str(block_size) + "_" + filename
+#         )
+#
+#         if os.path.exists(cached_features_file) and not args.overwrite_cache:
+#             logger.info("Loading features from cached file %s", cached_features_file)
+#             with open(cached_features_file, "rb") as handle:
+#                 self.examples = pickle.load(handle)
+#         else:
+#             logger.info("Creating features from dataset file at %s", directory)
+#
+#             self.examples = []
+#             #ATTENTION: read text line by line
+#             data = pd.read_csv(file_path, header=None).values.tolist()
+#             # text and labels
+#             self.examples = [(tokenizer.build_inputs_with_special_tokens(tokenizer.encode(i[0],
+#                 max_length=self.max_length, pad_to_max_length=True)), i[1]) for i in data]
+#
+#             logger.info("Saving features into cached file %s", cached_features_file)
+#             with open(cached_features_file, "wb") as handle:
+#                 pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
+#
+#     def __len__(self):
+#         return len(self.examples)
+#
+#     def __getitem__(self, item):
+#         # ATTENTION: return the label and the text
+#         text = self.examples[item][0]
+#         # pad to the max length
+#         return torch.tensor(text)
+#         # return torch.tensor(self.examples[item])
 
 def load_and_cache_examples(args, tokenizer, evaluate=False):
     dataset = TextDataset(
@@ -194,27 +230,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels
-#
-# def collate_fn(data):
-#     def pad_sequences(sequences):
-#         lengths = [len(seq) for seq in sequences]
-#
-#         padded_sequences = torch.zeros(len(sequences), max(lengths)).long() # padding value = pad_id
-#
-#         for i, seq in enumerate(sequences):
-#             end = lengths[i]
-#             padded_sequences[i, :end] = seq[:end]
-#
-#         return padded_sequences, lengths
-#
-#     item_info = {}
-#     for key in data[0].keys():
-#         item_info[key] = [d[key] for d in data]
-#
-#     x_batch, _ = pad_sequences(item_info["X"])
-#     y_batch = torch.tensor(item_info["y"], dtype=torch.long)
-#
-#     return x_batch, y_batch
+
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
@@ -223,7 +239,7 @@ def train(args, train_dataset, model, tokenizer):
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -235,10 +251,10 @@ def train(args, train_dataset, model, tokenizer):
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay) and p.requires_grad],
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
             "weight_decay": args.weight_decay,
         },
-        {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad], "weight_decay": 0.0},
+        {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(
@@ -318,13 +334,11 @@ def train(args, train_dataset, model, tokenizer):
                 steps_trained_in_current_epoch -= 1
                 continue
 
-            batch, clickbait = batch
             inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
-            clickbait = clickbait.to(args.device)
             model.train()
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels, condition_label = clickbait)
+            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
             if args.n_gpu > 1:
@@ -370,17 +384,6 @@ def train(args, train_dataset, model, tokenizer):
                     model_to_save = (
                         model.module if hasattr(model, "module") else model
                     )  # Take care of distributed/parallel training
-                    dirs = os.listdir(output_dir)
-                    dirs = ["{}/{}".format(output_dir, i) for i in dirs]
-                    dirs = [i for i in dirs if os.path.isdir(i)]
-                    print(dirs)
-                    if len(dirs) > 5:
-                        # remove the oldest
-                        oldest = min(dirs, key=os.path.getctime)
-                        print(oldest)
-                        shutil.rmtree(oldest)
-                        print("Remove {}".format(oldest))
-
                     model_to_save.save_pretrained(output_dir)
                     tokenizer.save_pretrained(output_dir)
 
@@ -433,13 +436,12 @@ def evaluate(args, model, tokenizer, prefix=""):
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        batch, c_labels = batch
         inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
         inputs = inputs.to(args.device)
         labels = labels.to(args.device)
-        c_labels = c_labels.to(args.device)
+
         with torch.no_grad():
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels, condition_label=c_labels)
+            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
         nb_eval_steps += 1
@@ -562,7 +564,7 @@ def main():
     parser.add_argument(
         "--save_total_limit",
         type=int,
-        default=5,
+        default=None,
         help="Limit the total amount of checkpoints, delete the older checkpoints in the output_dir, does not delete by default",
     )
     parser.add_argument(
@@ -594,7 +596,6 @@ def main():
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
     parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
-    parser.add_argument("--max_length", type=int, default=100, help="Max length of the input sequence.")
     args = parser.parse_args()
 
     if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
@@ -671,31 +672,21 @@ def main():
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
         do_lower_case=args.do_lower_case,
         cache_dir=args.cache_dir if args.cache_dir else None,
-        add_prefix_space=True,
-        max_length=args.max_length,
     )
-    # add the pad tokens
-
     if args.block_size <= 0:
         args.block_size = (
             tokenizer.max_len_single_sentence
         )  # Our input block size will be the max possible for the model
     args.block_size = min(args.block_size, tokenizer.max_len_single_sentence)
-    model, load_info = model_class.from_pretrained(
+    model = model_class.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
         cache_dir=args.cache_dir if args.cache_dir else None,
-        output_loading_info=True
     )
     tokenizer.add_special_tokens({"pad_token": "<pad>"})
     model.resize_token_embeddings(len(tokenizer))
     model.set_pad_index(tokenizer.pad_token_id)
-    for n, p in model.named_parameters():
-        if n in load_info['missing_keys']:
-            p.requires_grad = True
-        else:
-            p.requires_grad = False
     model.to(args.device)
 
     if args.local_rank == 0:
@@ -737,7 +728,6 @@ def main():
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
         tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        model.set_pad_index(tokenizer.pad_token_id)
         model.to(args.device)
 
     # Evaluation
@@ -754,7 +744,10 @@ def main():
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
+            # checkpoint = "distilgpt2"
             model = model_class.from_pretrained(checkpoint)
+            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+            model.resize_token_embeddings(len(tokenizer))
             model.set_pad_index(tokenizer.pad_token_id)
             model.to(args.device)
             result = evaluate(args, model, tokenizer, prefix=prefix)
