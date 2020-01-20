@@ -35,12 +35,12 @@ from transformers.file_utils import cached_path
 
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from sklearn.metrics import confusion_matrix
-from examples.pplm_clickbait.run_pplm import ClassificationHead, DISCRIMINATOR_MODELS_PARAMS
+from run_pplm import ClassificationHead, DISCRIMINATOR_MODELS_PARAMS
 torch.manual_seed(0)
 np.random.seed(0)
 EPSILON = 1e-10
 example_sentence = "This is incredible! I love it, this is the best chicken I have ever had."
-max_length_seq = 150
+max_length_seq = 1000
 
 
 class Discriminator(torch.nn.Module):
@@ -484,6 +484,13 @@ def train_discriminator(
                 discriminator.get_classifier().state_dict(),
                 "{}_classifier_head_epoch_{}.pt".format(dataset, epoch + 1),
             )
+def prepare_file():
+    path1 = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_gpt2_clickbait/test_generate.tsv"
+    path2 = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_gpt2_nonclickbait/test_generate.tsv"
+    data1 = pd.read_csv(path1, header=None, sep="\t")[[0,1, 2]]
+    data2 = pd.read_csv(path2, header=None, sep="\t")[[0,1, 2]]
+    data2[0] = 0
+    return pd.concat([data1, data2])
 
 def evaluate(dataset,
              dataset_fp=None,
@@ -500,6 +507,7 @@ def evaluate(dataset,
     class2idx = {c: i for i, c in enumerate(idx2class)}
     params = DISCRIMINATOR_MODELS_PARAMS["clickbait"]
     classifier = ClassificationHead(class_size=params["class_size"], embed_size=params["embed_size"]).to(device)
+    # use_method = "url"
     use_method = "url"
     if "url" in use_method:
         resolved_archive_file = cached_path(params["url"])
@@ -517,16 +525,26 @@ def evaluate(dataset,
     x_gen = []
     x = []
     y = []
-    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_freeze/generate.tsv"
-    file_path = "/home/yichuan/style_transfer/examples/pplm/generate.tsv"
+    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_freeze/test_generate.tsv"
+    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/pplm_gen/test_news_generate.tsv"
+    # file_path = "/home/yichuan/style_transfer/examples/pplm/generate.tsv"
+    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/pplm_gen/test_news_generate.tsv"
+    # file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/output_CLM_style/style_gen.csv"
+    # file_path = "/home/yichuan/grover/generated/gen_article.csv"
+    file_path = "/home/yichuan/style_transfer/examples/pplm_clickbait/grover_test_generated.tsv"
+
     data = pd.read_csv(file_path, sep="\t" if "tsv" in file_path else ",").values.tolist()
+    # data = open(file_path,'r').readlines()
+    # data = prepare_file()
+    # data = data.values.tolist()
     # with open("/home/yichuan/style_transfer/examples/pplm_clickbait/output_freeze/generate.csv") as f:
     for i, elements in enumerate(tqdm(data)):
         try:
             # elements = line.split(",")
-            d = {"text": elements[0], "gen": elements[1], "label": int(elements[-1])}
+            # d = {"text": elements[0], "gen": elements[1], "label": int(elements[-1])}
+            d = {"text": elements[1], "gen": elements[2], "label": 1}
             # d = {"text": elements[-1], "gen": elements[1], "label": int(elements[0])}
-            assert len(d['text'].split()) != len(d['gen'].split())
+            # assert len(d['text'].split()) != len(d['gen'].split())
             # d = eval(line)
             seq = discriminator.tokenizer.encode(d["text"])
             seq_gen = discriminator.tokenizer.encode(d["gen"])
@@ -562,7 +580,7 @@ def evaluate(dataset,
         "default_class": 1,
     }
 
-    evaluate_performance(test_loader, discriminator, device)
+    # evaluate_performance(test_loader, discriminator, device)
     print("The result for the generated samples are coming")
     evaluate_performance(test_loader_gen, discriminator, device)
 

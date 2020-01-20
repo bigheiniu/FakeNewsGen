@@ -51,3 +51,17 @@ class LayerNorm(nn.Module):
     def extra_repr(self):
         return '{normalized_shape}, eps={eps}, ' \
             'elementwise_affine={elementwise_affine}'.format(**self.__dict__)
+
+
+class ContentExtraction(nn.Module):
+    def __init__(self, embed_size, hidden_size):
+        super(ContentExtraction, self).__init__()
+        self.input_size = embed_size
+        self.outptu_size = hidden_size
+        self.LSTM = nn.LSTM(embed_size, hidden_size, batch_first=True)
+
+
+    def forward(self, content_embed):
+        _, (h_n, c_n) = self.LSTM(content_embed)
+        h_n = h_n.transpose(1, 0)
+        return h_n

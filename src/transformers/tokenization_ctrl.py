@@ -146,7 +146,12 @@ class CTRLTokenizer(PreTrainedTokenizer):
     @property
     def vocab_size(self):
         return len(self.encoder)
-
+        
+    def add_code(self, code_dic):
+        length_before = len(self.control_codes)
+        self.control_codes.update(code_dic)
+        print("Have sucessfully add {} special tokens".format(len(self.control_codes) - length_before))
+        
     def bpe(self, token):
         if token in self.cache:
             return self.cache[token]
@@ -191,6 +196,7 @@ class CTRLTokenizer(PreTrainedTokenizer):
         self.cache[token] = word
         return word
 
+    
     def _tokenize(self, text):
         """ Tokenize a string.
         """

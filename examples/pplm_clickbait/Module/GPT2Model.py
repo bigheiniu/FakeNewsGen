@@ -28,8 +28,8 @@ from torch.nn import CrossEntropyLoss
 from transformers.configuration_gpt2 import GPT2Config
 from transformers.file_utils import add_start_docstrings
 from transformers.modeling_utils import Conv1D, SequenceSummary, prune_conv1d_layer
-from examples.pplm_clickbait.Module.Layers import LayerNorm
-from examples.pplm_clickbait.Module.modeling_utils import PreTrainedModel
+from Module.Layers import LayerNorm, ContentExtraction
+from Module.model_util import PreTrainedModel
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +370,7 @@ class GPT2Model(GPT2PreTrainedModel):
 
     """
 
-    def __init__(self, config):
+    def __init__(self, config,use_fact=False):
         super(GPT2Model, self).__init__(config)
         self.output_hidden_states = config.output_hidden_states
         self.output_attentions = config.output_attentions
@@ -379,6 +379,8 @@ class GPT2Model(GPT2PreTrainedModel):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.condition_embedding = nn.Embedding(2, config.c_hidden_size)
+        self.use_fact = use_fact
+        self.fact_extract = ContentExtraction(embed_size=config.n_embd, hidden_size=config.c_hidden_size)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True, c_normal=config.c_normal,
                                       c_hidden_size=config.c_hidden_size) for _ in range(config.n_layer)])
@@ -407,6 +409,7 @@ class GPT2Model(GPT2PreTrainedModel):
     def forward(
         self,
         input_ids=None,
+        fact_ids=None,
         past=None,
         attention_mask=None,
         token_type_ids=None,
@@ -416,7 +419,13 @@ class GPT2Model(GPT2PreTrainedModel):
         condition_label=None
     ):
         if self.c_normal:
-            condition_emb = self.condition_embedding(condition_label)
+            if fact_ids is not None:
+                fact_embed = self.wte(fact_ids)
+                condition_emb = self.fact_extract(fact_embed)
+                self.use_fact=True
+            else:
+                self.use_fact=False
+                condition_emb = self.condition_embedding(condition_label)
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -607,6 +616,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
     def forward(
         self,
         input_ids=None,
+        fact_ids=None,
         past=None,
         attention_mask=None,
         token_type_ids=None,
@@ -619,6 +629,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         transformer_outputs = self.transformer(
             input_ids,
             past=past,
+            fact_ids=fact_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,

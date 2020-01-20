@@ -49,58 +49,42 @@ LATIN_1_CHARS = (
 )
 
 def load_news(data_path, save_path):
+    # ATTENTION: we only keep the previous 250 words
     type = data_path.split("/")[-1]
-    real_news = []
-    fake_news = []
+    news_list = []
+    max_news_length = 250
     for direc in os.listdir(data_path):
         direc = os.path.join(data_path, direc)
-        if "_fake" in direc:
+        if "_fake" in direc or "_real" in direc:
             for file in tqdm(os.listdir(direc)):
                 with open(os.path.join(direc, file, "news_article.json"), "r", ) as f1:
                     data = json.load(f1)
-                    try:
-                        news_fake = data["text"].replace("\n", " ")
-                        headline = data["title"].replace("\n", " ")
-                        if len(news_fake.split()) < 50:
-                            continue
-                        for _hex, _char in LATIN_1_CHARS:
-                            news_fake = news_fake.replace(_hex, _char)
-                            headline = headline.replace(_hex, _char)
-                    except:
-                        print(os.path.join(direc, file, "news_article.json"))
+                    if len(data) == 0:
                         continue
-                    if len(news_fake) < 1 or len(headline) < 1:
+                    news_content = data["text"].encode('ascii', 'ignore').decode('utf-8').replace("\n", " ")
+                    headline = data["title"].encode('ascii', 'ignore').decode('utf-8').replace("\n", " ")
+                    for _hex, _char in LATIN_1_CHARS:
+                        news_content = news_content.replace(_hex, _char)
+                        headline = headline.replace(_hex, _char)
+                    if len(news_content.split()) < 50:
                         continue
-                fake_news.append((headline, news_fake, 0))
+                    news_content = " ".join(news_content.split()[:max_news_length])
+                    if len(news_content) < 1 or len(headline) < 1:
+                        continue
 
-        elif "_real" in direc:
-            for file in tqdm(os.listdir(direc)):
-                with open(os.path.join(direc, file, "news_article.json"), "r") as f1:
-                    data = json.load(f1)
-                    try:
-                        news_real = data["text"].replace("\n", " ")
-                        headline = data["title"].replace("\n", " ")
-                        if len(news_real.split()) < 50:
-                            continue
-                        for _hex, _char in LATIN_1_CHARS:
-                            news_fake = news_fake.replace(_hex, _char)
-                            headline = headline.replace(_hex, _char)
-                    except:
-                        print(os.path.join(direc, file, "news_article.json"))
-                        continue
-                    if len(news_real) < 1 or len(headline) < 1:
-                        continue
-                real_news.append((headline, news_real, 1))
+                # ATTENTION: 0 is fake, 1 is real news
+                label = 0 if "_fake" in direc else 1
+                news_list.append((headline, news_content, label))
 
-    news_df = pd.DataFrame(real_news + fake_news, columns=["headline" ,'news', 'label'])
+    news_df = pd.DataFrame(news_list, columns=["headline" ,'news', 'label'])
     # news_df['news'] = news_df['news'].str.encode('utf-8')
     # news_df['headline'] = news_df['headline'].str.encode('utf-8')
     news_df.to_csv("{}/news_label_{}.csv".format(save_path, type), index=None)
-    return real_news + fake_news
+    return news_list
 
 
 if __name__ == '__main__':
-    data_path = "/home/yichuan/fake_news_data/gossip"
+    data_path = "/home/yichuan/fake_news_data/political_fact"
     save_news_path = "./data/news_corpus"
     load_news(data_path, save_news_path)
 

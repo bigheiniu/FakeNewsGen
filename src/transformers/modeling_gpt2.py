@@ -145,6 +145,7 @@ class Attention(nn.Module):
         if self.scale:
             w = w / math.sqrt(v.size(-1))
         nd, ns = w.size(-2), w.size(-1)
+        # this how attention mask works
         b = self.bias[:, :, ns - nd : ns, :ns]
         w = w * b - 1e4 * (1 - b)
 
@@ -567,6 +568,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         inputs = {"input_ids": input_ids}
         inputs.update(kwargs)
         return inputs
+
     def set_pad_index(self, id):
         self.pad_index = id
 
